@@ -1,4 +1,4 @@
-# crystalizer
+# Crystallizer
 A Map -> Reduce powerhouse,
 disguised as an insight summarization tool.
 
