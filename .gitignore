@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Formative Assets
+art_assets/
+
 # Mac OS X
 .DS_Store
 .Spotlight-V100
