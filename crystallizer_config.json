@@ -1,0 +1,29 @@
+{
+  "providers": {
+    "ollama": {
+      "host": "sharp-darwin.internal",
+      "port": 11434,
+      "model": "qwen2.5-coder:32b",
+      "context_length": 18000,
+      "options": {
+        "num_keep": 6000,
+        "num_predict": 1500,
+        "num_ctx": 18000,
+        "num_batch": 256,
+        "num_thread": 96,
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "use_mmap": true,
+        "use_mlock": true
+      }
+    },
+    "openai": {
+      "api_key": "your-openai-api-key-here",
+      "model": "gpt-4o-mini",
+      "base_url": "https://api.openai.com/v1",
+      "context_length": 128000,
+      "max_tokens": 1500,
+      "temperature": 0.1
+    }
+  }
+}

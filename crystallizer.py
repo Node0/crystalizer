@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""
+Crystallizer: LLM-powered text synthesis with token-aware windowing.
+Handles arbitrary text files/folders, provider-agnostic LLM backends.
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Dict, Any, List, Protocol
+import tiktoken
+from jinja2 import Template
+import requests
+import time
+
+
+class LLMProvider(Protocol):
+    def generate(self, system_prompt: str, user_content: str) -> str:
+        ...
+
+
+class OpenAIProvider:
+    def __init__(self, config: Dict[str, Any]):
+        self.api_key = config.get("api_key")
+        self.model = config.get("model", "gpt-4o-mini")
+        self.base_url = config.get("base_url", "https://api.openai.com/v1")
+        self.max_tokens = config.get("max_tokens", 1500)
+        self.temperature = config.get("temperature", 0.1)
+        
+        if not self.api_key:
+            raise ValueError("OpenAI API key required in config")
+    
+    def generate(self, system_prompt: str, user_content: str) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature
+        }
+        
+        response = requests.post(f"{self.base_url}/chat/completions", 
+                               headers=headers, json=payload)
+        response.raise_for_status()
+        
+        return response.json()["choices"][0]["message"]["content"]
+
+
+class OllamaProvider:
+    def __init__(self, config: Dict[str, Any]):
+        self.host = config.get("host", "localhost")
+        self.port = config.get("port", 11434)
+        self.model = config.get("model", "qwen2.5-coder:32b")
+        self.base_url = f"http://{self.host}:{self.port}"
+        self.options = config.get("options", {})
+    
+    def generate(self, system_prompt: str, user_content: str) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            "stream": False,
+            "options": self.options
+        }
+        
+        response = requests.post(f"{self.base_url}/api/chat", json=payload)
+        response.raise_for_status()
+        
+        return response.json()["message"]["content"]
+
+
+class TokenCounter:
+    def __init__(self, encoding_name: str = "cl100k_base"):
+        self.encoding = tiktoken.get_encoding(encoding_name)
+    
+    def count_tokens(self, text: str) -> int:
+        return len(self.encoding.encode(text))
+    
+    def chunk_text(self, text: str, max_tokens: int, overlap: int = 100) -> List[str]:
+        """Split text into chunks that fit within token limits."""
+        tokens = self.encoding.encode(text)
+        chunks = []
+        
+        start = 0
+        while start < len(tokens):
+            end = min(start + max_tokens, len(tokens))
+            chunk_tokens = tokens[start:end]
+            chunk_text = self.encoding.decode(chunk_tokens)
+            chunks.append(chunk_text)
+            
+            if end >= len(tokens):
+                break
+            start = end - overlap
+        
+        return chunks
+
+
+class Crystallizer:
+    def __init__(self, config_path: str, provider_name: str):
+        with open(config_path, 'r') as f:
+            self.config = json.load(f)
+        
+        self.provider_name = provider_name
+        self.provider_config = self.config["providers"][provider_name]
+        self.context_length = self.provider_config["context_length"]
+        
+        # Initialize provider
+        if provider_name == "openai":
+            self.provider = OpenAIProvider(self.provider_config)
+        elif provider_name == "ollama":
+            self.provider = OllamaProvider(self.provider_config)
+        else:
+            raise ValueError(f"Unknown provider: {provider_name}")
+        
+        self.token_counter = TokenCounter()
+    
+    def load_system_prompt(self, template_path: str, **kwargs) -> str:
+        """Load and render Jinja2 system prompt template."""
+        with open(template_path, 'r') as f:
+            template = Template(f.read())
+        return template.render(**kwargs)
+    
+    def create_filename(self, base_name: str, task_label: str, ordinal: int = None) -> str:
+        """Create deterministic filename: <base>__<task>__NNN.txt"""
+        if ordinal is not None:
+            return f"{base_name}__{task_label}__{ordinal:03d}.txt"
+        else:
+            return f"{base_name}__{task_label}__final.txt"
+    
+    def parse_filename(self, filename: str) -> tuple:
+        """Parse filename back into components."""
+        name = Path(filename).stem
+        parts = name.split("__")
+        if len(parts) >= 3:
+            base_name = parts[0]
+            task_label = parts[1]
+            ordinal_or_final = parts[2]
+            return base_name, task_label, ordinal_or_final
+        return None, None, None
+    
+    def process_single_window(self, content: str, system_prompt: str, 
+                            base_name: str, task_label: str, 
+                            window_idx: int, output_dir: Path) -> List[str]:
+        """Process a single window with 3-segment strategy."""
+        crystals = []
+        
+        # Create 3 micro-segments from this window
+        segment_size = len(content) // 3
+        segments = [
+            content[:segment_size],
+            content[segment_size:segment_size*2],
+            content[segment_size*2:]
+        ]
+        
+        for seg_idx, segment in enumerate(segments):
+            if not segment.strip():
+                continue
+                
+            try:
+                result = self.provider.generate(system_prompt, segment)
+                
+                # Create crystal filename
+                ordinal = window_idx * 3 + seg_idx
+                crystal_filename = self.create_filename(base_name, task_label, ordinal)
+                crystal_path = output_dir / crystal_filename
+                
+                with open(crystal_path, 'w') as f:
+                    f.write(result)
+                
+                crystals.append(str(crystal_path))
+                print(f"✓ Generated crystal: {crystal_filename}")
+                
+                # Brief pause to avoid rate limits
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"✗ Failed to process segment {seg_idx} of window {window_idx}: {e}")
+        
+        return crystals
+    
+    def merge_crystals(self, crystal_paths: List[str], system_prompt: str,
+                      base_name: str, task_label: str, output_dir: Path) -> str:
+        """Merge all crystals into final output."""
+        if not crystal_paths:
+            return None
+        
+        # Read all crystals
+        crystal_contents = []
+        for path in sorted(crystal_paths):
+            with open(path, 'r') as f:
+                crystal_contents.append(f.read())
+        
+        # Create merge prompt
+        merge_prompt = f"""You are merging {len(crystal_contents)} crystallized segments in chronological order.
+Combine them into a single, coherent, deduplicated summary while preserving:
+- Chronological ordering
+- Evolution of ideas (mark v1, v2, etc. if concepts evolve)
+- All key decisions and architectural insights
+- Remove redundancy but keep completeness
+
+Output should be well-structured and comprehensive."""
+        
+        combined_content = "\n\n--- CRYSTAL SEGMENT ---\n\n".join(crystal_contents)
+        
+        try:
+            final_result = self.provider.generate(merge_prompt, combined_content)
+            
+            # Write final crystal
+            final_filename = self.create_filename(base_name, task_label)
+            final_path = output_dir / final_filename
+            
+            with open(final_path, 'w') as f:
+                f.write(final_result)
+            
+            print(f"✓ Final crystal: {final_filename}")
+            return str(final_path)
+            
+        except Exception as e:
+            print(f"✗ Failed to merge crystals: {e}")
+            return None
+    
+    def process_file(self, file_path: Path, system_prompt: str, 
+                    task_label: str, output_dir: Path) -> str:
+        """Process a single text file."""
+        print(f"\n📄 Processing: {file_path.name}")
+        
+        # Read file content
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            print(f"✗ Skipping binary file: {file_path}")
+            return None
+        
+        base_name = file_path.stem
+        token_count = self.token_counter.count_tokens(content)
+        print(f"📊 Tokens: {token_count:,}")
+        
+        # Calculate safe window size (reserve tokens for system prompt)
+        safe_window = self.context_length - 2000  # Reserve for system prompt + response
+        
+        all_crystals = []
+        
+        if token_count <= safe_window:
+            print("🔄 Single window processing")
+            crystals = self.process_single_window(
+                content, system_prompt, base_name, task_label, 0, output_dir
+            )
+            all_crystals.extend(crystals)
+        else:
+            print(f"🔄 Multi-window processing ({token_count // safe_window + 1} windows)")
+            chunks = self.token_counter.chunk_text(content, safe_window)
+            
+            for window_idx, chunk in enumerate(chunks):
+                crystals = self.process_single_window(
+                    chunk, system_prompt, base_name, task_label, window_idx, output_dir
+                )
+                all_crystals.extend(crystals)
+        
+        # Merge all crystals for this file
+        final_crystal = self.merge_crystals(
+            all_crystals, system_prompt, base_name, task_label, output_dir
+        )
+        
+        # Clean up intermediate crystals
+        for crystal_path in all_crystals:
+            try:
+                os.remove(crystal_path)
+            except OSError:
+                pass
+        
+        return final_crystal
+    
+    def process_haystack(self, haystack_path: str, system_prompt_template: str,
+                        task_label: str, output_dir: str) -> List[str]:
+        """Main processing function."""
+        haystack = Path(haystack_path)
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Load system prompt
+        system_prompt = self.load_system_prompt(
+            system_prompt_template, 
+            task_label=task_label,
+            provider=self.provider_name
+        )
+        
+        final_crystals = []
+        
+        if haystack.is_file():
+            # Single file
+            result = self.process_file(haystack, system_prompt, task_label, output_path)
+            if result:
+                final_crystals.append(result)
+        
+        elif haystack.is_dir():
+            # Directory of files
+            text_files = [f for f in haystack.rglob("*.txt") 
+                         if f.is_file()]
+            text_files.extend([f for f in haystack.rglob("*.md") 
+                              if f.is_file()])
+            
+            print(f"📁 Found {len(text_files)} text files")
+            
+            for file_path in sorted(text_files):
+                result = self.process_file(file_path, system_prompt, task_label, output_path)
+                if result:
+                    final_crystals.append(result)
+        
+        else:
+            raise ValueError(f"Haystack path not found: {haystack_path}")
+        
+        print(f"\n🎯 Generated {len(final_crystals)} final crystals in {output_path}")
+        return final_crystals
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Crystallizer: LLM-powered text synthesis")
+    
+    parser.add_argument("--system-prompt", required=True,
+                       help="Path to Jinja2 system prompt template")
+    parser.add_argument("--haystack-path", required=True,
+                       help="Path to text file or directory")
+    parser.add_argument("--provider", required=True,
+                       help="LLM provider (openai, ollama)")
+    parser.add_argument("--config", default="config.json",
+                       help="Path to config file")
+    parser.add_argument("--output-dir", default="./crystals",
+                       help="Output directory for crystals")
+    parser.add_argument("--task-label", default="crystal",
+                       help="Task identifier for filenames")
+    
+    args = parser.parse_args()
+    
+    try:
+        crystallizer = Crystallizer(args.config, args.provider)
+        crystals = crystallizer.process_haystack(
+            args.haystack_path,
+            args.system_prompt,
+            args.task_label,
+            args.output_dir
+        )
+        
+        print(f"\n✅ Crystallization complete!")
+        print(f"📦 Output: {args.output_dir}")
+        
+    except Exception as e:
+        print(f"💥 Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
