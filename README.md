@@ -1,4 +1,4 @@
-# crystalizer
+# Crystallizer
 A Map -> Reduce powerhouse,
 disguised as an insight summarization tool.
 
@@ -12,4 +12,5 @@ However it can be programmed to do a large number
 of open-ended tasks, owing to it's templated
 system and task prompt design.
 
-![Crystallizer_flow_web](https://github.com/user-attachments/assets/97a45b90-0481-4401-8c95-dd953e66007e)
+![Crystallizer-Web](https://github.com/user-attachments/assets/97fd2904-10e8-4fe0-96c9-4bd06a8b195e)
+
