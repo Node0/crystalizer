@@ -16,13 +16,13 @@ system and task prompt design.
 
 ## Installation
 
-**📋 [Complete Installation Guide](INSTALL.md)** - Choose your preferred tool
+**📋 [Complete Installation Guide](INSTALLATION.md)** - Choose your preferred tool
 
 ### Quick Links by Tool:
 
-- **🚀 [UV Installation](INSTALL.md#-uv-recommended---fastest)** - Fastest setup
-- **📦 [Poetry Installation](INSTALL.md#-poetry-best-for-development)** - Best for development  
-- **🐍 [Pip Installation](INSTALL.md#-standard-pip-universal)** - Universal compatibility
+- **🚀 [UV Installation](INSTALLATION.md#-uv-recommended---fastest)** - Fastest setup
+- **📦 [Poetry Installation](INSTALLATION.md#-poetry-best-for-development)** - Best for development  
+- **🐍 [Pip Installation](INSTALLATION.md#-standard-pip-universal)** - Universal compatibility
 
 ### Quick Start (pip)
 
