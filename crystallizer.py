@@ -14,6 +14,7 @@ import tiktoken
 from jinja2 import Template
 import requests
 import time
+from utilities import Print
 
 
 class LLMProvider(Protocol):
@@ -30,6 +31,7 @@ class OpenAIProvider:
         self.temperature = config.get("temperature", 0.1)
         
         if not self.api_key:
+            Print("FAILURE", "OpenAI API key required in config")
             raise ValueError("OpenAI API key required in config")
     
     def generate(self, system_prompt: str, user_content: str) -> str:
@@ -153,6 +155,7 @@ class Crystallizer:
                             base_name: str, task_label: str, 
                             window_idx: int, output_dir: Path) -> List[str]:
         """Process a single window with 3-segment strategy."""
+        Print("STARTING", f"Window {window_idx}: 3-segment processing")
         crystals = []
         
         # Create 3 micro-segments from this window
@@ -167,7 +170,10 @@ class Crystallizer:
             if not segment.strip():
                 continue
                 
+            Print("PROGRESS", f"Window {window_idx}, segment {seg_idx + 1}/3")
+            
             try:
+                Print("ATTEMPT", f"LLM generation for segment {seg_idx}")
                 result = self.provider.generate(system_prompt, segment)
                 
                 # Create crystal filename
@@ -179,14 +185,15 @@ class Crystallizer:
                     f.write(result)
                 
                 crystals.append(str(crystal_path))
-                print(f"✓ Generated crystal: {crystal_filename}")
+                Print("SUCCESS", f"Generated crystal: {crystal_filename}")
                 
                 # Brief pause to avoid rate limits
                 time.sleep(0.1)
                 
             except Exception as e:
-                print(f"✗ Failed to process segment {seg_idx} of window {window_idx}: {e}")
+                Print("EXCEPTION", f"Failed to process segment {seg_idx} of window {window_idx}: {e}")
         
+        Print("COMPLETED", f"Window {window_idx}: Generated {len(crystals)} crystals")
         return crystals
     
     def merge_crystals(self, crystal_paths: List[str], system_prompt: str,
@@ -195,9 +202,12 @@ class Crystallizer:
         if not crystal_paths:
             return None
         
+        Print("STARTING", f"Merging {len(crystal_paths)} crystals")
+        
         # Read all crystals
         crystal_contents = []
-        for path in sorted(crystal_paths):
+        for idx, path in enumerate(sorted(crystal_paths)):
+            Print("PROGRESS", f"Reading crystal {idx + 1}/{len(crystal_paths)}")
             with open(path, 'r') as f:
                 crystal_contents.append(f.read())
         
@@ -214,6 +224,7 @@ Output should be well-structured and comprehensive."""
         combined_content = "\n\n--- CRYSTAL SEGMENT ---\n\n".join(crystal_contents)
         
         try:
+            Print("ATTEMPT", f"LLM merge of {len(crystal_contents)} segments")
             final_result = self.provider.generate(merge_prompt, combined_content)
             
             # Write final crystal
@@ -223,29 +234,29 @@ Output should be well-structured and comprehensive."""
             with open(final_path, 'w') as f:
                 f.write(final_result)
             
-            print(f"✓ Final crystal: {final_filename}")
+            Print("COMPLETED", f"Final crystal merge: {final_filename}")
             return str(final_path)
             
         except Exception as e:
-            print(f"✗ Failed to merge crystals: {e}")
+            Print("EXCEPTION", f"Failed to merge crystals: {e}")
             return None
     
     def process_file(self, file_path: Path, system_prompt: str, 
                     task_label: str, output_dir: Path) -> str:
         """Process a single text file."""
-        print(f"\n📄 Processing: {file_path.name}")
+        Print("INFO", f"Processing: {file_path.name}")
         
         # Read file content
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
         except UnicodeDecodeError:
-            print(f"✗ Skipping binary file: {file_path}")
+            Print("WARNING", f"Skipping binary file: {file_path}")
             return None
         
         base_name = file_path.stem
         token_count = self.token_counter.count_tokens(content)
-        print(f"📊 Tokens: {token_count:,}")
+        Print("INFO", f"Token count: {token_count:,}")
         
         # Calculate safe window size (reserve tokens for system prompt)
         safe_window = self.context_length - 2000  # Reserve for system prompt + response
@@ -253,16 +264,19 @@ Output should be well-structured and comprehensive."""
         all_crystals = []
         
         if token_count <= safe_window:
-            print("🔄 Single window processing")
+            Print("INFO", "Single window processing")
             crystals = self.process_single_window(
                 content, system_prompt, base_name, task_label, 0, output_dir
             )
             all_crystals.extend(crystals)
         else:
-            print(f"🔄 Multi-window processing ({token_count // safe_window + 1} windows)")
+            num_windows = token_count // safe_window + 1
+            Print("INFO", f"Multi-window processing ({num_windows} windows)")
+            Print("STARTING", f"Chunking {token_count:,} tokens into {num_windows} windows")
             chunks = self.token_counter.chunk_text(content, safe_window)
             
             for window_idx, chunk in enumerate(chunks):
+                Print("PROGRESS", f"Processing window {window_idx + 1}/{len(chunks)}")
                 crystals = self.process_single_window(
                     chunk, system_prompt, base_name, task_label, window_idx, output_dir
                 )
@@ -274,6 +288,7 @@ Output should be well-structured and comprehensive."""
         )
         
         # Clean up intermediate crystals
+        Print("STATE", f"Cleaning up {len(all_crystals)} intermediate crystal files")
         for crystal_path in all_crystals:
             try:
                 os.remove(crystal_path)
@@ -311,17 +326,22 @@ Output should be well-structured and comprehensive."""
             text_files.extend([f for f in haystack.rglob("*.md") 
                               if f.is_file()])
             
-            print(f"📁 Found {len(text_files)} text files")
+            Print("INFO", f"Found {len(text_files)} text files")
+            Print("STARTING", f"Batch processing {len(text_files)} files")
             
-            for file_path in sorted(text_files):
+            for file_idx, file_path in enumerate(sorted(text_files)):
+                Print("PROGRESS", f"File {file_idx + 1}/{len(text_files)}: {file_path.name}")
                 result = self.process_file(file_path, system_prompt, task_label, output_path)
                 if result:
                     final_crystals.append(result)
+            
+            Print("COMPLETED", f"Batch processing finished")
         
         else:
+            Print("FAILURE", f"Haystack path not found: {haystack_path}")
             raise ValueError(f"Haystack path not found: {haystack_path}")
         
-        print(f"\n🎯 Generated {len(final_crystals)} final crystals in {output_path}")
+        Print("SUCCESS", f"Generated {len(final_crystals)} final crystals in {output_path}")
         return final_crystals
 
 
@@ -344,7 +364,13 @@ def main():
     args = parser.parse_args()
     
     try:
+        Print("STARTING", "Initializing crystallizer")
         crystallizer = Crystallizer(args.config, args.provider)
+        
+        Print("STATE", f"System prompt: {args.system_prompt}")
+        Print("STATE", f"Provider: {args.provider}")
+        Print("STATE", f"Task label: {args.task_label}")
+        
         crystals = crystallizer.process_haystack(
             args.haystack_path,
             args.system_prompt,
@@ -352,11 +378,11 @@ def main():
             args.output_dir
         )
         
-        print(f"\n✅ Crystallization complete!")
-        print(f"📦 Output: {args.output_dir}")
+        Print("SUCCESS", "Crystallization complete!")
+        Print("INFO", f"Output directory: {args.output_dir}")
         
     except Exception as e:
-        print(f"💥 Error: {e}")
+        Print("EXCEPTION", f"Crystallization failed: {e}")
         sys.exit(1)
 
 
